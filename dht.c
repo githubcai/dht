@@ -688,19 +688,140 @@ static int parse_message(const unsigned char *buf, int buflen,
         }
     }
     if(target_return){
-    }
+		p = dht_memmem(buf, buflen, "6:target20:", 11);
+		if(p){
+			CHECK(p+11, 20);
+			memcpy(target_return, p+11, 20);
+		}else{
+			memset(target_return, 0, 20);
+		}
+	}
     if(token_return){
-    }
+		p = dht_memmem(buf, buflen, "5:token", 7);
+		if(p){
+			long l;
+			char *q;
+			l = strtol((char*)p+7, &q, 10);
+			if(q && *q==":" && l>0 && l<*token_len){
+				CHECK(q+1, l);
+				memcpy(token_return, q+1, l);
+				*token_len = l;
+			}else{
+				*token_len = 0;
+			}
+		}else{
+			*tolen_len = 0;
+		}
+	}
     if(nodes_len){
-    }
+		p = dht_memmem(buf, buflen, "5:nodes", 7);
+		if(p){
+			long l;
+			char *q;
+			l = strtol((char*)p+7, &q, 10);
+			if(q && q==":" && l>0 && l<*nodes_len){
+				CHECK(q+1, l);
+				memcpy(nodes_return, q+1, l);
+				*nodes_len = l;
+			}else{
+				*nodes_len = 0;
+			}
+		}else{
+			*nodes_len = 0;
+		}
+	}
     if(nodes6_len){
-    }
+		p = dht_memmem(buf, buflen, "6:nodes6", 8);
+		if(p){
+			long l;
+			char *q;
+			l = strtol((char*)p+8, &q, 10);
+			if(q && q==":" && l>0 && l<*nodes6_len){
+				CHECK(q+1, l);
+				memcpy(nodes6_return, q+1, l);
+				*nodes6_len = l;
+			}else{
+				*nodes6_len = 0;
+			}
+		}else{
+			*nodes6_len = 0;
+		}
+	}
     if(values_len || values6_len){
-    }
+		p = dht_memmem(buf, buflen, "6:valuesl", 9);
+		if(p){
+			int i=p-buf+9;
+			int j=0, j6=0;
+			while(1){
+				long l;
+				char *q;
+				l = strtol((char*)buf+i, &q, 10);
+				if(q && q==':' && l>0){
+					CHECK(q+1, l);
+					i = q + 1 + l - (char*)buf;
+					if(l==6){
+						if(j+l > *values_len){
+							continue;
+						}
+						memcpy((char*)values_return+j, q+1, l);
+						j += l;
+					}else if(l==18){
+						if(j6+l > *values6_len){
+							continue;
+						}
+						memcpy((char*)values6_return+j6, q+1, l);
+						j6 += l;
+					}else{
+						debugf("Received weird value -- %d bytes.\n", (int)l);
+					}
+				}else{
+					break;
+				}
+			}
+			if(i>=buflen || buf[i]!='e'){
+				debugf("eek... unexpected end for values.\n");
+			}
+			if(values_len){
+				*values_len = j;
+			}
+			if(values6_len){
+				*values6_len = j6;
+			}
+		}else{
+			if(values_len){
+				*values_len = 0;
+			}
+			if(values6_len){
+				*values6_len = 0;
+			}
+		}
+	}
     if(want_return){
     }
 
 #undef CHECK
+
+	if(dht_memmem(buf, buflen, "1:y1:r", 6)){
+		return REPLY;
+	}
+	if(dht_memmem(buf, buflen, "1:y1:e", 6)){
+		return ERROR;
+	}
+	if(dht_memmem(buf, buflen, "1:y1:q", 6)){
+		return -1;
+	}
+	if(dht_memmem(buf, buflen, "1:q4:ping", 9)){
+		return PING;
+	}
+	if(dht_memmem(buf, buflen, "1:q9:find_node", 14)){
+		return FIND_NODE;
+	}
+	if(dht_memmem(buf, buflen, "1:q9:get_peers", 14)){
+		return GET_PEERS;
+	}
+	if(dht_memmem(buf, buflen, "1:q13:announce_peer", 19)){
+		return ANNOUNCE_PEER;
+	}
     
 overflow:
     debugf("Truncated message.\n");
