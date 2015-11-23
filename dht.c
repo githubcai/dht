@@ -1,7 +1,10 @@
+#define _GUN_SOURCE
 #include <fcntl.h>
 #include <errno.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdlib.h>
+#include <sys/time.h>
 #include "dht.h"
 
 struct node{
@@ -61,7 +64,15 @@ struct peer{
 
 
 
-
+static const unsigned char zeroes[20] = {0};
+static const unsigned char ones[20] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF
+};
+static const unsigned char v4prefix[16] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0
+};
 
 static int dht_socket = -1;
 static int dht_socket6 = -1;
@@ -81,9 +92,29 @@ static struct bucket *buckets6 = NULL;
 static struct storage *storage;
 static int numstorage;
 
+static struct search *searches = NULL
+static int numsearches;
+static unsigned short search_id;
+
+#ifndef DHT_MAX_BLACKLISTED
+#define DHT_MAX_BLACKLISTED 10
+#endif //DHT_MAX_BLACKLISTED
+static struct sockaddr_storage blacklist[DHT_MAX_BLACKLISTED];
+int next_blacklisted;
+
 static struct timeval now;
+static time_t mybucket_grow_time, mybucket6_grow_time;
+static time_t expire_stuff_time;
+
+#define MAX_TOKEN_BUCKET_TOKENS 400
+static time_t token_bucket_time;
+static int token_bucket_tokens;
 
 FIEL *dht_debug = NULL;
+
+#ifndef DHT_SEARCH_EXPIRE_TIME
+#define DHT_SEARCH_EXPIRE_TIME (62 * 60)
+#endif //DHT_SEARCH_EXPIRE_TIME
 
 static void debugf(const char *format, ...){
 	va_list args;
@@ -95,6 +126,22 @@ static void debugf(const char *format, ...){
 	if(dht_debug){
 		fflush(dht_debug);
 	}
+}
+
+static void debug_printtable(const unsigned char *buf, int bufflen){
+    int i;
+    if(dht_debug){
+        for(i=0;i<buflen;i++){
+            putc((buf[i]>=32 && buf[i]<=126) ? buf[i] : '.', dht_debug);
+        }
+    }
+}
+
+static void print_hex(FILE *f, const unsigned char *buf, int buflen){
+    int i;
+    for(i=0;i<buflen;i++){
+        fprintf(f, "%02x", buf[i]);
+    }
 }
 
 static int set_nonblocking(int fd, int nonblocking){
@@ -124,8 +171,99 @@ static int make_tid(unsigned char *tid_return, const char *prefix, unsigned shor
 	memcpy(tid_return+2, &seqno, 2);
 }
 
+
+
+static int node_blacklisted(const struct sockaddr *sa, int salen){
+    int i;
+    if((unsigned)salen > sizeof(struct sockaddr_storage)){
+        abort();
+    }
+
+    if(dht_blacklisted(sa, salen)){
+        return 1;
+    }
+
+    for(i=0;i<DHT_MAX_BLACKLISTED;i++){
+        if(memcmp(&blacklist[i], sa, salen)==0){
+            return 1;
+        }
+    }
+}
+
+static void dump_bucket(FILE *f, struct bucket *b){
+    struct node *n=b->nodes;
+    fprintf(f, "Bucket ");
+    print_hex(f, b->first, 20);
+    fprintf(f, "count %d age %d%s%s:\n", 
+            b->count, (int)(now.tv_sec-b->time),
+            in_bucket(myid, b) ? "(mine)" : "",
+            b->cached.ss_family ? " (cached)": "");
+}
+
+
+#define CHECK(offset, delta, size)                          \
+    if(delta<0 || offset+delta>size) goto fail
+
+#define INC(offset, delta, size)                            \
+    CHECK(offset, delta, size);                             \
+    offset += delta
+
+#define COPY(buf, offset, src, delta, size)                 \
+    CHECK(offset, delta, size);                             \
+    memcpy(buf+offset, src, delta);                         \
+    offset += delta;
+
+#define ADD_V(buf, offset, size)                            \
+    if(have_v){                                             \
+        COPY(buf, offset, my_v, sizeof(my_v), size);        \
+    }
+
+static int dht_send(const void *buf, size_t len, int flas,
+                    const struct sockaddr *sa, int salen){
+    int s;
+    if(salen==0){
+        abort();
+    }
+
+    if(node_blacklisted(sa, salen)){
+        debugf("Attempting to send to blacklisted node.\n");
+        errno = EPERM;
+        return -1;
+    }
+
+    if(sa->sa_family==AF_INET){
+        s = dht_socket;
+    }else if(sa->sa_family==AF_INET6){
+        s = dht_socket6;
+    }else{
+        s = -1;
+    }
+
+    if(s<0){
+        errno = EAFNOSUPPORT;
+        reutrn -1;
+    }
+
+    return sendto(s, buf, len, flags, sa, salen);
+}
+
 int send_ping(const struct sockaddr *sa, int salen, const unsigned char *tid, int tid_len){
-	char buf[]
+	char buf[512];
+    int i=0, rc;
+    rc = snprintf(buf+i, 512-i, "d1:ad2:id20:");
+    INC(i, rc, 512);
+    COPY(buf, i, myid, 20, 512);
+    rc = snprintf(buf+i, 512-i, "e1:q4:ping1:t%d:", tid_len);
+    INC(i, rc, 512);
+    COPY(buf, i, tid, tid_len, 512);
+    ADD_V(buf, i, 512);
+    rc = snprintf(buf+i, 512-i, "1:y1:qe");
+    INC(i, rc, 512);
+    return dht_send(buf, i, 0, sa, salen);
+
+fail:
+    errno = ENOSPC;
+    return -1;
 }
 
 static int node_good(struct node *node){
@@ -163,9 +301,65 @@ static struct node* new_node(const unsigned char *id, const struct sockaddr *sa,
 	}
 }
 
+static int in_bucket(const unsigned char *id, struct bucket *b){
+    return id_cmp(b->first, id)<=0 && 
+        (b->next==NULL || id_cmp(id, b->next->first)<0);
+}
 
+static struct bucket* find_bucket(unsigned const char *id, int af){
+    struct bucket *b = (af==AF_INET ? buckets : buckets6);
 
+    if(b==NULL){
+        return NULL
+    }
 
+    while(1){
+        if(b->next==NULL){
+            return b;
+        }
+        if(id_cmp(id, b->next->first)<0){
+            return b;
+        }
+        b = b->next;
+    }
+}
+
+static struct storage* find_storage(const unsigned char *id){
+    struct storage *st=storage;
+
+    while(st){
+        if(id_cmp(id, st->id)==0){
+            break;
+        }
+        st = st->next
+    }
+    return st;
+}
+
+static int is_martian(const struct sockaddr *sa){
+    switch(sa->sa_family){
+    case AF_INET:{
+        struct sockaddr_in *sin=(struct sockaddr_in*)sa;
+        const unsigned char *address=(const unsigned char*)&sin->sin_addr;
+        return sin->port==0 ||
+            (address[0]==0) ||
+            (address[0]==127) ||
+            ((address[0]&0xE0)==0xE0);
+    }
+    case AF_INET6:{
+        struct sockaddr_in6 *sin6=(struct sockaddr_in6*)sa;
+        const unsigned char *address=(const unsigned char*)&sin6->sin6_addr;
+        return sin6->sin6_port==0   ||
+            (address[0]==0xFF)      ||
+            (adress[0]==0xFE && (address[1] & 0xC0)==0x80)  ||
+            (memcmp(address, zeros, 15)==0 &&
+            (adress[15]==0 || address[15]==1)) ||
+            (memcmp(address, v4prefix, 12)==0);
+    }
+    default:
+        return 0;
+    }
+}
 
 
 
@@ -313,4 +507,242 @@ int dht_ping_node(struct sockaddr *sa, int salen){
 	debugf("Sending ping.\n");
 	make_tid(tid, "pn", 0);
 	return send_ping(sa, salen, tid, 4);
+}
+
+int dht_get_nodes(struct sockaddr_in *sin, int *num, struct sockaddr_in6, int *num6){
+    int i, j;
+    struct bucket *b;
+    struct node *n;
+
+    i = 0;
+
+    b = find_bucket(myid, AF_INET);
+    if(b==NULL){
+        goto no_ipv4;
+    }
+
+    n = b->nodes;
+    while(n && i<*num){
+        if(node_good(n)){
+            sin[i] = *(struct sockaddr_in*)&n->ss;
+            i++;
+        }
+        n = n->next;
+    }
+
+    b = buckets;
+    while(b && i<*num){
+        if(!in_bucket(myid, b)){
+            n = b->nodes;
+            while(n && i<*num){
+                if(node_good(n)){
+                    sin[i] = *(struct sockaddr_in*)&n->ss;
+                    i++;
+                }
+                n = n->next;
+            }
+        }
+        b = b->next;
+    }
+
+no_ipv4:
+    j = 0;
+
+    b = find_bucket(my_AF_INET6);
+    if(b==NULL){
+        goto no_ipv6;
+    }
+
+    n = b->nodes;
+    while(n && j<*num6){
+        if(node_good(n)){
+            sin6[j] = *(struct sockaddr_in*)&n->ss;
+            j++;
+        }
+        n = n->next;
+    }
+
+    b = buckets6;
+    while(b && j<*num6){
+        if(!in_bucket(myid, b)){
+            n = b->nodes;
+            while(n && j<*num6){
+                if(node_good[n]){
+                    sin6[j] = *(struct sockaddr_in6*)&n->ss;
+                    j++;
+                }
+                n = n->next;
+            }
+        }
+        b = b->next;
+    }
+no_ipv6:
+    *num = i;
+    *num6 = j;
+    return i+j;
+}
+
+int dht_search(const unsigned char *id, int port, int af, dht_callback *callback, void *closure){
+    struct search *sr;
+    struct storage *st;
+    struct bucket *b=find_bucket(id, af);
+
+    if(b==NULL){
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+
+    if(callback){
+        st = find_storage(id);
+    }
+}
+
+void dht_dump_tables(FILE *f){
+    int i;
+    struct bucket *b;
+    struct storage *st=storage;
+    struct search *sr=searches;
+
+    fprintf(f, "My id ");
+    print_hex(f, myid, 20);
+    fprintf(f, "\n");
+
+    b = buckets;
+    while(b){
+        dump_buckets(f, b);
+        b = b->next;
+    }
+}
+
+static void* dht_memmem(const void *haystack, size_t haystacklen,
+                        const void *needle, size_t needlelen){
+    return memmem(haystack, haystacklen, needle, needlelen);             
+}
+
+static int parse_message(const unsigned char *buf, int buflen, 
+                         unsigned char *tid_return, int *tid_len,
+                         unsigned char *id_return, unsigned char *info_hash_return,
+                         unsigned char *taget_return, unsigned char *port_return,
+                         unsigned char *token_return, int *token_len,
+                         unsigned char *nodes_return, int *nodes_len,
+                         unsigned char *nodes6_return, int *nodes6_len,
+                         unsigned char *values_return, int *values_len,
+                         unsigned char *values6_return, int *values6_len,
+                         int *want_return){
+    const unsigned char *p;
+
+    if(buf[buflen]!='\0'){
+        debugf("Eek!  parse_message with unterminated buffer.\n");
+        return -1;
+    }
+
+#define CHECK(ptr, len) \
+    if(((unsigned char*)ptr) + (len) > (buf) + (buflen)) goto overflow;
+
+    if(tid_return){
+        p = dht_memmem(buf, buflen, "1:t", 3);
+        if(p){
+            long l;
+            char *q;
+            l = strtol((char*)p+3, &q, l);
+            if(q && *q==':' && l>0 && l<*tid_len){
+                CHECK(q+1, l);
+                memcpy(tid_return, q+1, l);
+                *tid_len = l;
+            }else{
+                *tid_len = 0;
+            }
+        }
+    }
+    if(id_return){
+        p = dht_memmem(buf, buflen, "2:id20:", 7);
+        if(p){
+            CHECK(p+7, 20);
+            memcpy(id_return, p+7, 20);
+        }else{
+            memset(id_return, 0, 20);
+        }
+    }
+    if(info_hash_return){
+        p = dht_memmem(buf, buflen, "9:info_hash20:", 14);
+        if(p){
+            CHECK(p+14, 20);
+            memcpy(info_hash_return, p+14, 20);
+        }else{
+            memset(info_hash_return, 0, 20);
+        }
+    }
+    if(port_return){
+        p = dht_memmem(buf, buflen, "porti", 5);
+        if(p){
+            long l;
+            char *q;
+            l = strtol((char*)p+5, &q, 10);
+            if(q && *q=='e' && l>0 && l<0x10000){
+                *port_return = l;
+            }else{
+                *port_return = 0;
+            }
+        }else{
+            *port_return = 0;
+        }
+    }
+    if(target_return){
+    }
+    if(token_return){
+    }
+    if(nodes_len){
+    }
+    if(nodes6_len){
+    }
+    if(values_len || values6_len){
+    }
+    if(want_return){
+    }
+
+#undef CHECK
+    
+overflow:
+    debugf("Truncated message.\n");
+    return -1;
+}
+
+int dht_periodic(const void *buf, size_t buflen, 
+                 const struct sockaddr *from, int fromlen, 
+                 time_t *tosleep,dht_callback *callback, void *closure){
+    gettimeofday(&now, NULL);
+
+    if(buflen>0){
+        int message;
+        unsigned char tid[16], id[20], info_hash[20], target[20];
+        unsigned char nodes[256], nodes6[1024], token[128];
+        int tid_len=16, token_len=128;
+        int nodes_len=256, nodes6_len=1024;
+        unsigned short port;
+        unsigned char values[2048], values6[2048]
+        int values_len=2048, values_len=2048;
+        int want;
+        unsigned short ttid;
+
+        if(is_martian(from)){
+            goto dontread;
+        }
+
+        if(node_blacklisted(from, fromlen)){
+            debugf("Received packet from blacklisted node.\n");
+            goto dontread;
+        }
+
+        if(((char*)buf)[buflen]!='\0'){
+            debugf("Unterminated message.\n");
+            errno = EINVAL;
+            return -1;
+        }
+
+        message = parse_message(buf, buflen, tid, &tid_len, id, info_hash,
+                                target, &port, token, &token_len,
+                                nodes, &nodes_len, nodes6, &nodes6_len,
+                                values, &values_len, values6, &values6_len,
+                                &want);
+    }
 }
