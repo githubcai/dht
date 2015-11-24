@@ -797,7 +797,7 @@ static int parse_message(const unsigned char *buf, int buflen,
 		}
 	}
     if(want_return){
-    }
+	}
 
 #undef CHECK
 
