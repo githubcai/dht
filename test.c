@@ -23,10 +23,17 @@ lowbit(const unsigned char *id){
 }
 
 int main(){
-	unsigned char *a = "1";
-	printf("%x", a[0]);
+	unsigned char *a = "1234567890123456789z";
+    int i;
+    for(i=0;i<20;i++){
+        printf("%02x", a[i]);
+    }
+    printf("\n");
+//	printf("%x", a[0]);
 //	printf("%x", a[1]);
-//1	printf("%x\n", a[2]);
+//	printf("%x\n", a[2]);
 	printf("lowbit = %d\n", lowbit(a));
+
+    printf("%02x\n", (0xff & (0xff00>>4)));
 	return 0;
 }

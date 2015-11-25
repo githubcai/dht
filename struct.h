@@ -22,6 +22,7 @@ struct bucket{
 
 struct search_node{
 	unsigned char id[20];
+    struct sockaddr_storage ss;
 	int sslen;
 	time_t request_time;				// the time of the last unanswered request
 	time_t reply_time;					// the time of the last reply
@@ -60,3 +61,22 @@ struct storage{
 	struct peer *peers;
 	struct storage *next;
 };
+
+/* The time after which we consider a search to be expirable. */
+#ifndef DHT_SEARCH_EXPIRE_TIME
+#define DHT_SEARCH_EXPIRE_TIME (62 * 60)
+#endif // DHT_SEARCH_EXPIRE_TIME
+
+
+/* The maximum number of nodes that we snub. There is probably little
+   reason to increase this value. */
+#ifndef DHT_MAX_BLACKLISTED
+#define DHT_MAX_BLACKLISTED 10
+#endif // DHT_MAX_BLCKLISTED
+static struct sockaddr_storage blackliste[DHT_MAX_BLACKLISTED];
+int next_blacklisted;
+
+static struct search *searches = NULL;
+static int numsearches;
+static unsigned short search_id
+

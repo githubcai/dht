@@ -48,3 +48,16 @@ lowbit(const unsigned char *id){
 	}
 	return 8 * i + j;
 }
+
+static void
+debugf(const char *format, ...){
+    va_list args;
+    va_start(args, format);
+    if(dht_debug){
+        vfprintf(dht_debug, format, args);
+    }
+    va_end(args);
+    if(dht_debug){
+        fflush(dht_debug);
+    }
+}
