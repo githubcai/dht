@@ -249,3 +249,80 @@ node_blacklisted(const struct sockaddr *sa, in salen){
 
     return 0;
 }
+
+/* Split a bucket into two equal parts. */
+static struct bucket*
+split_bucket(struct bucket *b){
+	struct bucket *new;
+	struct node *nodes;
+	int rc;
+	unsigned char new_id[20];
+
+	rc = bucket_middle(b, new_id);
+	if(rc < 0){
+		return NULL;
+	}
+
+	new = calloc(1, sizeof(struct bucket));
+	if(new == NULL){
+		return NULL;
+	}
+
+	new->af = b->af;
+
+	send_cached_ping(b);
+
+	memcpy(new->first, new_id, 20);
+	new->time = b->time;
+
+	nodes = b->nodes;
+	b->nodes = NULL;
+	b->count = 0;
+	new->next = b->next;
+	b->next = new;
+	while(nodes){
+		struct node *n;
+		n = nodes;
+		nodes = nodes->next;
+		insert_node(n);
+	}
+	return b; 
+}
+
+/* Called periodically to purge known-bad nodes. Note that we're very
+   conservative here: broken nodes in the table don't do much harm, we'll
+   recover as soon as we find better ones. */
+static int
+expire_buckets(struct bucket *b){
+	while(b){
+		struct node *n, *p;
+		int changed = 0;
+
+		while(b->nodes && b->nodes->pinged >= 4){
+			n = b->nodes;
+			b->nodes = n->next;
+			b->count--;
+			changed = 1;
+			free(n);
+		}
+
+		p = b->nodes;
+		while(p){
+			while(p->next && p->next->pinged >= 4){
+				n = p->next;
+				p->next = n->next;
+				b->count--;
+				changed = 1;
+				free(n);
+			}
+			p = p->next;
+		}
+
+		if(changed){
+			send_cached_ping(b);
+		}
+		b = b->next;
+	}
+	expire_stuff_time = now.tv_sec + 120 + random() % 240;
+	return 1;
+}
