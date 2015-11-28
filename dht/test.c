@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
+#include <netdb.h>
 #include <sys/socket.h>
 #include <string.h>
 #include <stdio.h>
@@ -90,10 +91,10 @@ main(int argc, char *argv[]){
     }
 
     while(i < argc){
-        struct addrinfo, hints, *info, *infop;
+        struct addrinfo hints, *info, *infop;
         memset(&hints, 0, sizeof(hints));
         hints.ai_socktype = SOCK_DGRAM;
-        hints.ai_family = AF_INET:
+        hints.ai_family = AF_INET;
         rc = getaddrinfo(argv[i], argv[i + 1], &hints, &info);
         if(rc != 0){
         
@@ -119,7 +120,7 @@ main(int argc, char *argv[]){
     }
 
     sin.sin_port = htons(port);
-    rc = bind(s, (struct sockaddr*)&sin, sizeof(sin));
+    rc = bind(sfd, (struct sockaddr*)&sin, sizeof(sin));
     if(rc < 0)
 
     close(sfd);
