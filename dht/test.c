@@ -12,6 +12,10 @@
 #include <unistd.h>
 #include "dht.h"
 
+#define MAX_BOOTSTRAP_NODES 20
+static struct sockaddr_storage bootstrap_nodes[MAX_BOOTSTRAP_NODES];
+static int num_bootstrap_nodes = 0;
+
 static void
 usage(){
     printf("Usage: dht-example [-q] [-b address]...\n"
@@ -97,9 +101,29 @@ main(int argc, char *argv[]){
         hints.ai_family = AF_INET;
         rc = getaddrinfo(argv[i], argv[i + 1], &hints, &info);
         if(rc != 0){
-        
+			fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc));
+			exit(1);
         }
+
+		i++;
+		if(i >= argc){
+			usage();
+		}
+
+		infop = info;
+		while(infop){
+			memcpy(&bootstrap_nodes[num_bootstrap_nodes],
+					infop->ai_addr, infop->ai_addrlen);
+			infop = infop->ai_next;
+			num_bootstrap_nodes++;
+		}
+		freeaddrinfo(info);
+		i++;
     }
+
+	if(!quiet){
+		dht_debug = stdout;
+	}
 
     fd = open("/dev/urandom", O_RDONLY);
     if(fd < 0){
@@ -121,8 +145,22 @@ main(int argc, char *argv[]){
 
     sin.sin_port = htons(port);
     rc = bind(sfd, (struct sockaddr*)&sin, sizeof(sin));
-    if(rc < 0)
+    if(rc < 0){
+		perror("bind(IPv6)");
+		exit(1);
+	}
 
+	rc = dht_init(sfd, 0, myid, NULL);
+	if(rc < 0){
+		perror("dht_init");
+		exit(1);
+	}
+
+	for(i = 0; i < num_bootstrap_nodes; i++){
+		dht_ping_node((struct sockaddr*)&bootstrap_nodes[i],
+					  sizeof(bootstrap_nodes[i]));
+		usleep(random() % 100000);
+	}
     close(sfd);
 
     return EXIT_SUCCESS;
