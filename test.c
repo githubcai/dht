@@ -1,39 +1,23 @@
 #include <stdio.h>
+#include <unistd.h>
 
-static int
-lowbit(const unsigned char *id){
-	int i, j;
-	for(i=19;i>=0;i--){
-		if(id[i]!=0){
-			break;
-		}
-	}
+int main(int argc, char *argv[]){
+    int oc;
+    char *b_opt_arg;
 
-	if(i<0){
-		return -1;
-	}
-
-	for(j=7;j>=0;j--){
-		if((id[i] & (0x80 >> j)) != 0){
-			break;
-		}
-	}
-
-	return 8 * i + j;
-}
-
-int main(){
-	unsigned char *a = "1234567890123456789z";
-    int i;
-    for(i=0;i<20;i++){
-        printf("%02x", a[i]);
+    while((oc = getopt(argc, argv, "ngl:")) != -1){
+        switch(oc){
+        case 'n':
+            printf("My name is Lyong.\n");
+            break;
+        case 'g':
+            printf("Her nam eis Xxiong.\n");
+            break;
+        case 'l':
+            b_opt_arg = optarg;
+            printf("Our love is %s\n", optarg);
+            break;
+        }
     }
-    printf("\n");
-//	printf("%x", a[0]);
-//	printf("%x", a[1]);
-//	printf("%x\n", a[2]);
-	printf("lowbit = %d\n", lowbit(a));
-
-    printf("%02x\n", (0xff & (0xff00>>4)));
-	return 0;
+    return 0;
 }
