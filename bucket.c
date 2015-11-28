@@ -227,7 +227,7 @@ blacklist_node(const unsigned char* id, const struct sockaddr *sa, int salen){
     }
     /* And make sure we don't hear from it again. */
     memcpy(&blacklist[next_blacklisted], sa, salen);
-    next_blacklisted  (next_blacklisted + 1) % DHT_MAX_BLACKLISTED;
+    next_blacklisted = (next_blacklisted + 1) % DHT_MAX_BLACKLISTED;
 }
 
 static int
@@ -324,5 +324,22 @@ expire_buckets(struct bucket *b){
 		b = b->next;
 	}
 	expire_stuff_time = now.tv_sec + 120 + random() % 240;
+	return 1;
+}
+
+/* Rate control for requests we receive. */
+static int
+token_bucket(void){
+	if(token_bucket_tokens == 0){
+		token_bucket_tokens = MIN(MAX_TOKEN_BUCKET_TOKENS, 100 * (now.tv_sec - token_bucket_time));
+
+		token_bucket_time = now.tv_sec;
+	}
+
+	if(token_bucket_tokens == 0){
+		return 0;
+	}
+
+	token_bucket_tokens--;
 	return 1;
 }

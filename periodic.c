@@ -75,10 +75,11 @@ dht_periodic(const void *buf, size_t buflen,
 					gp = 1;
 					sr = find_search(ttid, from->sa_family);
 				}
-				debugf("Nodes found (%d+%d)%s!\n", nodes_len/26, nodes6_len/38,
+				debugf("Nodes found (%d+%d)%s!\n", nodes_len / 26, nodes6_len / 38,
 					   gp ? " for get_peers" : "");
 				if(nodes_len % 26 != 0 || nodes6_len % 38 != 0){
 					debugf("Unexpected length for node info!\n");
+					blacklist_node(id, from, fromlen);
 				}else if(gp && sr == NULL){
 					debugf("Unknown search!\n");
 					new_node(id, from, fromlen, 1);
@@ -93,12 +94,81 @@ dht_periodic(const void *buf, size_t buflen,
 						}
 						memset(&sin, 0, sizeof(sin));
 						sin.sin_family = AF_INET;
-						memcpy(&sin.sin_addr, i + 20, 4);
-
+						memcpy(&sin.sin_addr, ni + 20, 4);
+						memcpy(&sin.sin_port, ni + 20, 2);
+						new_node(ni, (struct sockaddr*)&sin, sizeof(sin), 0);
+						if(sr && sr->af == AF_INET){
+							insert_search_node(ni,
+											   (struct sockaddr*)&sin,
+											   sizeof(sin),
+											   sr, 0, NULL, 0);
+						}
+					}
+					for(i = 0; i < nodes6_len / 38; i++){
+						unsigned char *ni = nodes6 + i * 38;
+						struct sockaddr_in6 sin6;
+						if(id_cmp(ni, myid) == 0){
+							continue;
+						}
+						memset(&sin6, 0, sizeof(sin6));
+						sin6.sin6_family = AF_INET6;
+						memcpy(&sin6.sin6_addr, ni + 20, 16);
+						memcpy(&sin6.sin6_port, ni + 36, 2);
+						new_node(ni, (struct sockaddr*)&sin6, sizeof(sin6), 0);
+						if(sr && sr->af == AF_INET6){
+							insert_search_node(ni,
+											   (struct sockaddr*)&sin6,
+											   sizeof(sin6),
+											   sr, 0, NULL, 0);
+						}
+					}
+					if(sr){
+						/* Since we received a reply, the number of
+						   requests in flight has decreased. Let's push
+						   another request. */
+						search_send_get_peer(sr, NULL);
+					}
+					if(sr){
+						insert_search_node(id, from, fromlen, sr,
+										   1, token, token_len);
+						if(values_len > 0 || values6_len > 0){
+							debugf("Got values (%d+%d)!\n",
+									values_len / 6, values6_len / 18);
+							if(callback){
+								if(values_len > 0){
+									(*callback)(closure, DHT_EVENT_VALUES, sr->id,
+												(void*)values, values_len);
+								}
+								if(values6_len > 0){
+									(*callback)(closure, DHT_EVENT_VALUES6, sr->id,
+												(void*)values6, values6_len);
+								}
+							}
+						}
 					}
 				}
 			}else if(tid_match(tid, "ap", &ttid)){
-			
+				struct search *sr;
+				debugf("Got reply to announce_peer.\n");
+				sr = find_search(ttid, from->sa_family);
+				if(!sr){
+					debugf(id, from, fromlen, 2);
+					new_node(id, from, fromlen, 1);
+				}else{
+					int i;
+					new_node(id, from, fromlen, 2);
+					for(i = 0; i < sr->numnodes; i++){
+						if(id_cmp(sr->nodes[i].id, id) == 0){
+							sr->nodes[i].request_time = 0;
+							sr->nodes[i].reply_time = now.tv_sec;
+							sr->nodes[i].acked = 1;
+							sr->nodes[i].pinged = 0;
+							break;
+						}
+					}
+					/* See comment for gp above. */
+					search_send_get_peers(sr, NULL);
+				}
 			}else{
 				debugf("Unexpected reply: ");
 				debug_printable(buf, buflen);
@@ -193,7 +263,65 @@ dontread:
 		struct search *sr;
 		sr = searches;
 		while(sr){
-			if(!sr->done && sr->step_time + 5 <= now.tv_sec)
+			if(!sr->done && sr->step_time + 5 <= now.tv_sec){
+				search_step(sr, callback, closure);
+			}
+			sr = sr->next;
+		}
+
+		search_time = 0;
+
+		sr = searches;
+		while(sr){
+			if(!s->done){
+				time_t tm = s->step_time + 15 + random() % 10;
+				if(search_time == 0 || search_time > tm){
+					search_time = tm;
+				}
+			}
+			sr = sr->next;
 		}
 	}
+
+	if(now.tv_sec >= confirm_nodes_time){
+		int soon = 0;
+
+		soon |= bucket_maintenance(AF_INET);
+		soon |= bucket_maintenance(AF_INET6);
+
+		if(!soon){
+			if(mybucket_grow_time >= now.tv_sec - 150){
+				soon |= neighbourhood_maintenance(AF_INET);
+			}
+			if(mybucket6_grow_time >= now.tv_sec - 150){
+				soon |= neighbourhood_maintenance(AF_INET6);
+			}
+		}
+
+		/* In order to maintain all buckets' age within 600 seconds, worst
+		   case is roughtly 27 seconds, assuming the table is 22 bits deep.
+		   We want to keep a margin for neighborhood maintenance, so keep
+		   this within 25 second.*/
+		if(soon){
+			confirm_nodes_time = now.tv_sec + 5 + random() % 20;
+		}else{
+			confirm_nodes_time = now.tv_sec + 60 + random() % 120;
+		}
+	}
+
+	if(confirm_nodes_time > now.tv_sec){
+		*tosleep = confirm_nodes_time - now.tv_sec;
+	}else{
+		*tosleep = 0;
+	}
+
+	if(search_time > 0){
+		if(search_time <= now.tv_sec){
+			*tosleep = 0;
+		}else if(*tosleep > search_time - now.tv_sec){
+			*tosleep = search_time - now.tv_sec;
+		}
+	}
+
+	return 1;
 }

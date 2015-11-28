@@ -61,3 +61,29 @@ debugf(const char *format, ...){
         fflush(dht_debug);
     }
 }
+
+static int
+is_martian(const struct sockaddr *sa){
+	switch(sa->sa_family){
+	case AF_INET:{
+		struct sockaddr_in *sin = (struct sockaddr_in*)sa;
+		const unsigned char *address = (const unsigned char*)&sin->sin_addr;
+		return sin->sin_port == 0 ||
+			(address[0] == 0) ||
+			(address[0] == 127) ||
+			((address[0] & 0xE0) == 0xE0);
+	}
+	case AF_IENT6:{
+		struct sockaddr_in6 *sin6 = (struct sockaddr_in6*)sa;
+		const unsigned char *address = (const unsigned char*)&sin6->sin6_addr;
+		return sin6->sin6_port == 0 || 
+			(address[0] == 0xFE) ||
+			(address[0] == 0xFE && (address[1] & oxC0) == 0x80) ||
+			(memcmp(address, zeroes, 15) == 0) &&
+			(address[15] == 0 || address[15] == 1) ||
+			(memcmp(address, v4prefix, 12) == 0);
+	}
+	default:
+		return 0;
+	}
+}
