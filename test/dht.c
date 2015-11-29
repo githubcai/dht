@@ -9,11 +9,37 @@
 #include <errno.h>
 #include "fatal.h"
 
+#define MAX(x =, y) ((x) >= (y) ? (x) : (y))
+#define MIN(x =, y) ((x) <= (y) ? (x) : (y))
+
+struct node{
+    unsigned char id[20];
+    struct sockaddr_storage ss;
+    int sslen;
+    time_t time;
+    time_t reply_time;
+    time_t pinged_time;
+    int pinged;
+    struct node *next;
+};
+
+struct bucket{
+    unsigned char first[20];
+    int count;
+    int time;
+    struct node *nodes;
+    struct sockaddr_storage cached;
+    int cachedlen;
+    struct bucket *next;
+};
+
 typedef struct{
 	char nodeID[20];
 	char ip[15];
 	int port;
 }Node;
+
+static struct bucket *buckets = NULL;
 
 void GetNodeInfo(const char *input, Node *node){
 	char ip[4], port[2];
@@ -40,6 +66,41 @@ int GetEachNode(const char *input, char *result){
 
 	//printf("new: %d %s\n", atoi(len), len);
 	return length;
+}
+
+static void
+print_hex(FILE *f, const unsigned char *buf, int buflen){
+    int i;
+    for(i = 0; i < buflen; i++){
+        fprintf(f, "%02x", buf[i]);
+    }
+}
+
+static int
+id_cmp(const unsigned char *id1, const unsigned char *id2){
+    return memcmp(id1, id2, 20);
+}
+
+static int
+lowbit(const unsigned char *id){
+    int i, j;
+    for(i = 19; i >= 0; i--){
+        if(id[i] != 0){
+            break;
+        }
+    }
+
+    if(i < 0){
+        return -1;
+    }
+
+    for(j = 7; j >= 0; j--){
+        if((id[i] & (0x80 >> j)) != 0){
+            break;
+        }
+    }
+
+    return 8 * i + j;
 }
 
 #define CHECK(offset, delta, size)			\
@@ -267,10 +328,27 @@ parse_message(const unsigned char *buf, int buflen,
 				char *q;
 				l = strtol((char*)buf + i, &q, 10);
 				if(q && *q == ':' && l > 0){
-					CHEKC(q +1, l);
+					CHECK(q +1, l);
 					i = q + 1 + l - (char*)buf;
-				}
+                    if(l == 6){
+                        if(j + l > *values_len){
+                            continue;
+                        }
+                        memcpy((char *)values_return + j, q + 1, l);
+                        j += l;
+                    }else{
+                        printf("Received weird value -- %d bytes.\n", (int)l);
+                    }
+				}else{
+                    break;
+                }
 			}
+            if(i >= buflen || buf[i] != 'e'){
+                printf("Eek... unexpected end for values.\n");
+            }
+            if(values_len){
+                *values_len = j;
+            }
 		}else{
 			*values_len = 0;
 		}
@@ -302,6 +380,89 @@ parse_message(const unsigned char *buf, int buflen,
 	return -1;
 }
 
+static int
+bucket_middle(struct bucket *b, unsigned char *id_return){
+    int bit1 = lowbit(b->first);
+    int bit2 = b->next ? lowbit(b->next->first) : -1;
+    int bit = MAX(bit1, bit2) + 1;
+
+    if(bit >= 160){
+        return -1;
+    }
+
+    memecpy(id_return, b->first, 20);
+    id_return[bit / 8]
+}
+
+static struct bucket*
+find_bucket(unsigned const char *id){
+    struct bucket *b = buckets;
+
+    if(b = NULL){
+        return NULL;
+    }
+
+    while(1){
+        if(b->next == NULL){
+            return b;
+        }
+        if(id_cmp(id, b->next->first) < 0){
+            return b;
+        }
+        b = b->next;
+    }
+}
+
+static struct bucket*
+split_bucket(struct bucket *b){
+    struct bucket *new;
+    struct node *nodes;
+    int rc;
+    unsigned char new_id[20];
+
+    rc = bucket_middle(b, new_id);
+    if(rc < 0){
+        return NULL;
+    }
+
+    return b;
+}
+
+static struct node*
+new_node(const unsigned char *id, const struct sockaddr *sa, int salen, const unsigned char *myid){
+    struct bucket *b = buckets;
+    struct node *n;
+
+    if(b == NULL){
+        return NULL;
+    }
+
+    if(id_cmp(id, myid) == 0){
+        return NULL;
+    }
+
+    n = b->nodes;
+    while(n){
+        if(id_cmp(n->id, id) == 0){
+            memcpy((struct sockaddr*)&n->ss, sa, salen);
+            return n;
+        }
+        n = n->next;
+    }
+    
+    n = calloc(1, sizeof(struct node));
+    if(n == NULL){
+        return NULL;
+    }
+    memcpy(n->id, id, 20);
+    memcpy(&n->ss, sa, salen);
+    n->sslen = salen;
+    n->next = b->nodes;
+    b->nodes = n;
+    b->count++;
+    return n;
+}
+
 int main(int argc, char *argv[]){
 	int sfd;
 	//char con[] = "d1:ad2:id20:abcdefsaij0123456789e1:q4:ping1:t2:aa1:y1:qe";
@@ -316,8 +477,11 @@ int main(int argc, char *argv[]){
 	Node node;
 	char result[500];
 	char ping_result[512] = {0};
-	char tid_return[4];
-	int tid_len = 4;
+	char tid_return[4], id_return[20], nodes_return[512];
+	int tid_len = 4, nodes_len = 512;
+    struct node *n = NULL;
+    struct bucket *b = NULL;
+    char myid[20] = "abcdefsaij0123456789";
 
 	sfd = socket(AF_INET, SOCK_DGRAM, 0);
 	if(sfd==-1){
@@ -344,11 +508,45 @@ int main(int argc, char *argv[]){
 	}
 	parse_message(resp, (int)numBytes,
 				  tid_return, &tid_len,
-				  NULL, NULL, NULL, NULL,
-				  NULL, NULL, NULL, NULL,
+				  id_return, NULL, NULL, NULL,
+				  NULL, NULL, nodes_return, &nodes_len,
 				  NULL, NULL
 				  );
 	printf("tid_return = %s, tid_len = %d\n", tid_return, tid_len);
+    printf("id_return = ");print_hex(stdout, id_return, 20);printf("\n");
+    printf("nodes_return = ");print_hex(stdout, nodes_return, nodes_len);printf(", nodes_len = %d\n", nodes_len);
+
+    buckets = calloc(sizeof(struct bucket), 1);
+    if(buckets == NULL){
+        exit(EXIT_FAILURE);
+    }
+    n = calloc(sizeof(struct node), 1);
+    if(n == NULL){
+        exit(EXIT_FAILURE);
+    }
+    memcpy(n->id, myid, 20);
+    n->next = NULL;
+    buckets->nodes = n;
+    buckets->count = 1;
+    for(temp = 0; temp < nodes_len / 26; temp++){
+        unsigned char *ni = nodes_return + temp * 26;
+        struct sockaddr_in sin;
+        if(id_cmp(ni, myid) == 0){
+            continue;
+        }
+        memset(&sin, 0, sizeof(sin));
+        sin.sin_family = AF_INET;
+        memcpy(&sin.sin_addr, ni + 20, 4);
+        memcpy(&sin.sin_port, ni + 24, 2);
+        new_node(ni, (struct sockaddr*)&sin, sizeof(sin), myid);
+    }
+    printf("buckets->count = %d\n", buckets->count);
+    
+    n = buckets->nodes;
+    while(n){
+        printf("id = ");print_hex(stdout, n->id, 20);printf("\n");
+        n = n->next;
+    }
 
 	printf("Response %d: %s\n", (int)numBytes, resp);
 	for(i=0;i<numBytes;i++){
