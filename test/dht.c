@@ -7,10 +7,12 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <errno.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include "fatal.h"
 
-#define MAX(x =, y) ((x) >= (y) ? (x) : (y))
-#define MIN(x =, y) ((x) <= (y) ? (x) : (y))
+#define MAX(x, y) ((x) >= (y) ? (x) : (y))
+#define MIN(x, y) ((x) <= (y) ? (x) : (y))
 
 struct node{
     unsigned char id[20];
@@ -66,6 +68,22 @@ int GetEachNode(const char *input, char *result){
 
 	//printf("new: %d %s\n", atoi(len), len);
 	return length;
+}
+
+static int
+set_nonblocking(int sfd, int nonblocking){
+	int rc;
+	rc = fcntl(sfd, F_GETFL, 0);
+	if(rc < 0){
+		return -1;
+	}
+
+	rc = fcntl(sfd, F_SETFL, nonblocking ? (rc | O_NONBLOCK) : (rc & ~O_NONBLOCK));
+	if(rc < 0){
+		return -1;
+	}
+
+	return 0;
 }
 
 static void
@@ -390,8 +408,9 @@ bucket_middle(struct bucket *b, unsigned char *id_return){
         return -1;
     }
 
-    memecpy(id_return, b->first, 20);
-    id_return[bit / 8]
+    memcpy(id_return, b->first, 20);
+    id_return[bit / 8] |= (0x80 >> (bit % 8));
+	return 1;
 }
 
 static struct bucket*
@@ -413,6 +432,20 @@ find_bucket(unsigned const char *id){
     }
 }
 
+static struct node*
+insert_node(struct node *node){
+	struct bucket *b = find_bucket(node->id);
+
+	if(b == NULL){
+		return NULL;
+	}
+
+	node->next = b->nodes;
+	b->nodes = node;
+	b->count++;
+	return node;
+}
+
 static struct bucket*
 split_bucket(struct bucket *b){
     struct bucket *new;
@@ -424,6 +457,23 @@ split_bucket(struct bucket *b){
     if(rc < 0){
         return NULL;
     }
+	
+	new = calloc(1, sizeof(struct bucket));
+	if(new == NULL){
+		return NULL;
+	}
+	
+	memcpy(new->first, new_id, 20);
+	nodes = b->nodes;
+	b->nodes = NULL;
+	b->count = 0;
+	new->next = b->next;
+	b->next = new;
+	while(nodes){
+		struct node *n;
+		n = nodes;
+		nodes = nodes->next;
+	}
 
     return b;
 }
@@ -488,6 +538,8 @@ int main(int argc, char *argv[]){
 		Error("scoket");
 	}
 
+	set_nonblocking(sfd, 1);
+
 	bzero(&claddr, sizeof(struct sockaddr_in));
 	claddr.sin_family = AF_INET;
 	claddr.sin_addr.s_addr = inet_addr("91.121.59.153");
@@ -497,15 +549,32 @@ int main(int argc, char *argv[]){
 		Error("sendto");
 	}
 */	
-	if(send_find_node(sfd, (struct sockaddr*)&claddr, sizeof(claddr), "abcdefghij01234567899", "aa", 2, "abcdefghij01234567899") < 0){
+	while(1){
+	struct timeval tv;
+	fd_set readfds;
+	tv.tv_sec = 5;
+	tv.tv_usec = random() % 1000000;
+	int rc;
+
+	if(send_find_node(sfd, (struct sockaddr*)&claddr, sizeof(claddr), myid,  "aa", 2, "abcdefghij01234567899") < 0){
 		Error("sendto");
 	}
 	
-
+	FD_ZERO(&readfds);
+	FD_SET(sfd, &readfds);
+	rc = select(sfd, &readfds, NULL, NULL, &tv);
+	if(rc < 0){
+		perror("select");
+		sleep(1);
+		continue;
+	}
+	
 	numBytes = recvfrom(sfd, resp, 1000, 0, NULL, NULL);
 	if(numBytes==-1){
-		Error("recvfrom");
+		//Error("recvfrom");
+		continue;
 	}
+	
 	parse_message(resp, (int)numBytes,
 				  tid_return, &tid_len,
 				  id_return, NULL, NULL, NULL,
@@ -547,6 +616,22 @@ int main(int argc, char *argv[]){
         printf("id = ");print_hex(stdout, n->id, 20);printf("\n");
         n = n->next;
     }
+	
+	if(!split_bucket(buckets)){
+		exit(EXIT_FAILURE);
+	}
+	if(!split_bucket(buckets)){
+		exit(EXIT_FAILURE);
+	}
+	if(!split_bucket(buckets)){
+		exit(EXIT_FAILURE);
+	}
+	b = buckets;
+	while(b){
+		printf("first = ");print_hex(stdout, b->first, 20);printf("\n");
+		b = b->next;
+	}
+	
 
 	printf("Response %d: %s\n", (int)numBytes, resp);
 	for(i=0;i<numBytes;i++){
@@ -567,5 +652,9 @@ int main(int argc, char *argv[]){
 	printf("%d\n",port[0]);
 	printf("%u\n", ntohs(*((uint16_t *)port)));
 
+	
+	
+	
+	}
 	exit(EXIT_SUCCESS);
 }
