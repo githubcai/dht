@@ -134,6 +134,13 @@ send_get_peers(int sfd, const struct sockaddr *sa, int salen, char *myid,
 #undef INC
 #undef COPY
 
+
+#define ERROR			0
+#define REPLY			1
+#define PING			2
+#define FIND_NODE		3
+#define GET_PEERS		4
+#define ANNOUNCE_PEER	5
 static int
 parse_message(const unsigned char *buf, int buflen,
 			  unsigned char *tid_return, int *tid_len,
@@ -171,8 +178,128 @@ parse_message(const unsigned char *buf, int buflen,
 		}
 	}
 
+	if(id_return){
+		p = memmem(buf, buflen, "2:id20:", 7);
+		if(p){
+			CHECK(p + 7, 20);
+			memcpy(id_return, p + 7, 20);
+		}else{
+			memset(id_return, 0, 20);
+		}
+	}
+
+	if(info_hash_return){
+		p = memmem(buf, buflen, "9:info_hash20:", 14);
+		if(p){
+			CHECK(p + 14, 20);
+			memcpy(info_hash_return, p + 14, 20);
+		}else{
+			memset(info_hash_return, 0, 20);
+		}
+	}
+
+	if(port_return){
+		p = memmem(buf, buflen, "porti", 5);
+		if(p){
+			long l;
+			char *q;
+			l = strtol((char*)p + 5, &q, 10);
+			if(q && *q == 'e' && l > 0 && l < 0x10000){
+				*port_return = l;
+			}else{
+				*port_return = 0;
+			}
+		}else{
+			*port_return = 0;
+		}
+	}
+	
+	if(target_return){
+		p = memmem(buf, buflen, "6:target20:", 11);
+		if(p){
+			CHECK(p + 11, 20);
+			memcpy(target_return, p + 11, 20);
+		}else{
+			memset(target_return, 0, 20);
+		}
+	}
+
+	if(token_return){
+		p = memmem(buf, buflen, "5:token", 7);
+		if(p){
+			long l;
+			char *q;
+			l = strtol((char*)p + 7, &q, 10);
+			if(q && *q == ':' && l > 0 && l < *token_len){
+				CHECK(q + 1, l);
+				memcpy(token_return, q + 1, l);
+				*token_len = 0;
+			}
+		}else{
+			*token_len = 0;
+		}
+	}
+
+	if(nodes_len){
+		p = memmem(buf, buflen, "5:nodes", 7);
+		if(p){
+			long l;
+			char *q;
+			l = strtol((char*)p + 7, &q, 10);
+			if(q && *q == ':' && l > 0 && l < *nodes_len){
+				CHECK(q + 1, l);
+				memcpy(nodes_return, q +1, l);
+				*nodes_len = l;
+			}else{
+				*nodes_len = 0;
+			}
+		}else{
+			*nodes_len = 0;
+		}
+	}
+
+	if(values_len){
+		p = memmem(buf, buflen, "6:valuesl", 9);
+		if(p){
+			int i = p - buf +9, j = 0;
+			while(1){
+				long l;
+				char *q;
+				l = strtol((char*)buf + i, &q, 10);
+				if(q && *q == ':' && l > 0){
+					CHEKC(q +1, l);
+					i = q + 1 + l - (char*)buf;
+				}
+			}
+		}else{
+			*values_len = 0;
+		}
+	}
+
 #undef CHECK
-	return 0;
+	if(memmem(buf, buflen, "q:y1:r", 6)){
+		return REPLY;
+	}
+	if(memmem(buf, buflen, "1:y1:e", 6)){
+		return ERROR;
+	}
+	if(!memmem(buf, buflen, "1:y1:q", 6)){
+		return -1;
+	}
+	if(memmem(buf, buflen, "1:q4:ping", 9)){
+		return PING;
+	}
+	if(memmem(buf, buflen, "1:q9:find_node", 14)){
+		return FIND_NODE;
+	}
+	if(memmem(buf, buflen, "1:q9:get_peers", 14)){
+		return GET_PEERS;
+	}
+	if(memmem(buf, buflen, "1:q13:announcer_peer", 19)){
+		return ANNOUNCE_PEER;
+	}
+
+	return -1;
 }
 
 int main(int argc, char *argv[]){
